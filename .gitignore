@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local config and credentials
+.env
+kaggle.json
+
+# Runtime data: SQLite file, generated CSVs, datasets, annotated images
+data/*
+!data/.gitkeep
+!data/fixtures/
+*.db
+*.sqlite
+*.sqlite3
+
+# Model artefacts (trained locally; see README for how to reproduce)
+ml/models/*
+!ml/models/.gitkeep
+vision/models/*
+!vision/models/.gitkeep
+*.pt
+*.onnx
+runs/
+
+# Editors and OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

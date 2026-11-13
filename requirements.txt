@@ -1,0 +1,39 @@
+# Pinned to the versions this project was built and run with (Python 3.13.9, Windows 11, CPU only).
+# After installing, run `python scripts/check_env.py` to confirm every compiled library loads.
+
+# Backend
+fastapi==0.162.5
+uvicorn[standard]==0.54.0
+SQLAlchemy==2.0.43
+python-multipart==0.0.33
+python-dotenv==1.2.4
+
+# Data and anomaly detection
+numpy==2.5.4
+pandas==3.1.1
+scikit-learn==1.7.2
+joblib==1.6.0
+
+# Vision
+ultralytics==8.4.211
+opencv-python==5.0.0.93
+torch==2.8.0
+torchvision==0.23.0
+
+# Dashboard
+streamlit==1.67.0
+plotly==7.1.0
+
+# HTTP clients (simulator, dashboard, test client)
+requests==2.34.2
+httpx==0.28.1
+
+# Tests
+pytest==9.2.0
+
+# Indirect dependencies pinned to older releases on purpose. The newest wheels of these
+# (and of torch, scikit-learn and SQLAlchemy above) contain compiled files that Windows
+# Smart App Control blocked on the development laptop. See docs/DECISIONS.md, D8.
+pyarrow==21.0.0
+polars==1.34.0
+fonttools==4.60.1
