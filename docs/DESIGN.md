@@ -24,11 +24,14 @@ backend and the predictor.
 
 | Signal | Typical normal | Warning limit | Failure limit | Fails by |
 |--------|----------------|---------------|---------------|----------|
-| Temperature | 35–60 °C | 75 °C | 95 °C | rising |
-| Vibration | 1.5–3.5 mm/s | 7.1 mm/s | 11.0 mm/s | rising |
-| Belt speed | 4.0 m/s nominal | 3.6 m/s | 3.2 m/s | falling |
-| Belt load | 50–90 % | 100 % | 120 % | rising |
-| Motor current | 180–300 A | 340 A | 400 A | rising |
+| Temperature | 37–71 °C | 75 °C | 95 °C | rising |
+| Vibration | 1.7–3.4 mm/s | 7.1 mm/s | 11.0 mm/s | rising |
+| Belt speed | 3.9–4.1 m/s | 3.6 m/s | 3.2 m/s | falling |
+| Belt load | 46–93 % | 100 % | 120 % | rising |
+| Motor current | 207–311 A | 340 A | 400 A | rising |
+
+"Typical normal" is the minimum-to-maximum range of healthy readings in a 48-hour
+simulator run (seed 42).
 
 Where the numbers come from:
 
@@ -51,3 +54,29 @@ level the predictor extrapolates trends to.
 | A3 | The belt loop is twice the conveyor length plus 30 m of pulley wrap (10 030 m by default). | The belt runs out on the carry side and back on the return side. The exact figure only matters for the vision registry, and it is configurable. |
 | A4 | Nominal belt speed is 4.0 m/s, so one lap takes about 42 minutes. | Within the usual range for long overland conveyors. It sets how often the camera sees the same piece of belt. |
 | A5 | Timestamps are UTC, ISO 8601. | Avoids daylight-saving and time-zone ambiguity between simulator, backend and dashboard. |
+
+## 3. Failure modes considered
+
+| Mode | Kind | What the simulator does | Signal that reaches its failure limit |
+|------|------|-------------------------|---------------------------------------|
+| Idler / bearing wear | gradual | Vibration rises first. Temperature starts to follow after about a third of the fault's life. Current rises slightly. | Vibration (11 mm/s) |
+| Belt slip / drive problem | gradual | Mean belt speed sags and fluctuates more. Current rises. Slight heating. | Speed (3.2 m/s) |
+| Overload | gradual | Load goes to about 115 % early and stays. Current is high because load is high. Temperature climbs for as long as it lasts. | Temperature (95 °C) |
+| Blockage | sudden | For 1 to 5 minutes: load jumps, current jumps with it, speed drops. | none (not predictable) |
+| Spike | sudden | One reading of one signal is 1.6 to 2.5 times its true value. | none (not predictable) |
+
+A gradual fault lasts 4 to 24 simulated hours from start to failure. After the failure the
+signals stay at failure level for 20 to 60 minutes (the repair), then the station is healthy
+again. Growth follows `progress ** shape` with a random shape per fault, so some faults drift
+almost linearly and others start slowly and accelerate.
+
+Not modelled: belt mistracking, pulley lagging wear, gearbox faults, and faults that spread
+from one station to the next. Each would need a signal the brief does not list (edge
+position, acoustic, oil) or a model of coupling between stations.
+
+### Messy data produced by the simulator
+
+Missing field, NaN, physically impossible value, wrong type (text in a numeric field),
+duplicate reading, late (out-of-order) reading, a stuck signal repeating one value, and a
+station that goes silent. The default is 3 % of readings with a point corruption, plus
+occasional stuck and silent episodes. How the backend treats each one is in section 5.

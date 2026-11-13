@@ -77,3 +77,60 @@ Scope cuts are logged here too, with the reason.
 - **Choice:** create each file when it has real content.
 - **Reason:** the spec forbids placeholders in core paths, and a commit history where files
   appear with their implementation is easier to review.
+
+---
+
+## Phase 2: simulator
+
+### D10. Faults adjust healthy values; they do not generate their own
+- **Options:** separate signal generators per fault; one healthy model whose output a fault modifies.
+- **Choice:** one healthy model; a fault first changes the load, then the other signals.
+- **Reason:** a fault on a real belt sits on top of normal load swings and the day/night
+  cycle. Keeping those underneath the fault is what makes detection non-trivial.
+
+### D11. Fault growth is `progress ** shape`, with a random shape between 1.0 and 2.2
+- **Options:** linear growth only; exponential growth; a random power curve.
+- **Choice:** random power curve per fault.
+- **Reason:** the predictor extrapolates a linear trend. If the simulator only produced
+  linear drift, the evaluation would be a self-fulfilling test. Curved faults make the
+  linear fit over-estimate the time left early on, and the evaluation shows by how much.
+
+### D12. The simulated failure time is fixed when the fault starts
+- **Reason:** it gives every reading an exact "time until failure" label. The failing
+  signal is driven to its failure limit at that moment (vibration for bearing wear, speed
+  for slip, temperature for overload).
+- **Limit:** real components do not fail at an exact threshold. Stated in the evaluation.
+
+### D13. Load is fed at the tail and reaches each station after its travel time
+- **Options:** independent random load per station; one feed profile with transport delay.
+- **Choice:** shared feed profile, delayed by km / belt speed, plus small per-station noise.
+- **Reason:** it is the same material passing each station, and it costs one line of code.
+
+### D14. Messy data is applied after the true values are computed, and is labelled
+- Each damaged reading carries `gt_messy` in the CSV (never sent to the backend), so tests
+  and evaluation can tell a corrupted reading from a fault.
+- A silent station writes nothing to the CSV either: the CSV is a record of what was emitted.
+- "Missing field" removes the timestamp in about 15 % of cases, so the backend's reject
+  path gets exercised as well as its flag path.
+
+### D15. `--speedup` shortens the wait between ticks; it does not change the sampling interval
+- **Options:** keep the tick rate and make each tick cover more simulated time; keep 5 s
+  samples and send them faster.
+- **Choice:** keep 5 s samples.
+- **Reason:** the rolling features and trend fits are tuned to the sampling interval. If
+  speed-up changed it, the live demo would not behave like the data the model was trained on.
+- **Consequence:** in live mode simulated time runs ahead of the wall clock. The backend
+  therefore measures "offline" by arrival time, and everything else by reading timestamps.
+
+### D16. Backfill does not post to the backend unless `--post` is given
+- **Reason:** 48 hours is about 340 000 readings. Its purpose is training data. Sending it
+  through synchronous analysis would take a long time for no benefit.
+
+### D17. Additions to the CLI beyond the spec
+- `--inject MODE:SENSOR:HOURS` starts a chosen fault at once (so a demo does not wait for a
+  random one), `--messy-rate`, `--messy-kinds`, `--csv`, `--backend-url`, `--post`, `--no-post`.
+- `--duration` is in real seconds (how long the process runs), not simulated seconds.
+
+### D18. Backfill ends at the current time, so two runs with the same seed differ in timestamps
+- The fault sequence is the same for a given seed, but the day/night phase depends on when
+  the run happens. `ml.evaluation` passes a fixed end time so its numbers are repeatable.
