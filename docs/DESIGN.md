@@ -54,6 +54,8 @@ level the predictor extrapolates trends to.
 | A3 | The belt loop is twice the conveyor length plus 30 m of pulley wrap (10 030 m by default). | The belt runs out on the carry side and back on the return side. The exact figure only matters for the vision registry, and it is configurable. |
 | A4 | Nominal belt speed is 4.0 m/s, so one lap takes about 42 minutes. | Within the usual range for long overland conveyors. It sets how often the camera sees the same piece of belt. |
 | A5 | Timestamps are UTC, ISO 8601. | Avoids daylight-saving and time-zone ambiguity between simulator, backend and dashboard. |
+| A6 | The belt has one identifiable reference marker (a known splice or a purpose-made mark) that passes the camera once per lap. | Position along a loop needs a zero. Real belts have many splices; picking out one of them is treated as given. |
+| A7 | The belt-condition camera is on the return side, looking at the carry cover. | On the carry side the belt is covered by material. |
 
 ## 3. Failure modes considered
 
@@ -184,3 +186,158 @@ Station status, most urgent first: `offline`, `predicted failure` (risk High or 
 `abnormal` (an anomaly is active), `normal`.
 
 Measured results and their limits are in [evaluation_results.md](evaluation_results.md).
+
+## 8. The continuous-loop problem (analysis before any vision code)
+
+The brief says only: "The belt is a continuous loop, and your vision component has to
+account for that." This section works out what follows from that sentence. Numbers use the
+defaults: a 5 km conveyor, a belt loop of 10 030 m (A3), belt speed 4 m/s, so one lap takes
+about 2 507 s, or 42 minutes.
+
+### 8.1 Two reference frames
+
+Sensor stations are bolted to the structure. Their position is a kilometre along the
+conveyor and never changes. Damage is on the belt, and the belt moves. A tear seen by a
+camera at kilometre 0.1 is at kilometre 2.6 ten minutes later and on the return side
+twenty minutes after that. "Where is the damage" therefore has no answer in conveyor
+kilometres. It has an answer in **belt coordinates**: metres along the loop from a fixed
+reference mark on the belt, from 0 to 10 030.
+
+Consequences for the design:
+
+- Damage is never attached to a sensor station, and the vision tables have no station id.
+- The dashboard shows damage on its own axis (position along the belt loop), separate from
+  the station line.
+- The camera is the only fixed thing in the vision system. It has a station-frame position,
+  which matters for one purpose only: telling maintenance when a given piece of belt will
+  next pass an access point.
+
+### 8.2 Repeat sightings
+
+A fixed camera sees every point of the belt once per lap. One tear produces one detection
+every 42 minutes, 34 a day. Counting detections would report 34 "damages" a day for a
+belt with one tear, growing without limit. The quantity to report is **unique damages**,
+which requires deciding, for each detection, whether it is something already known.
+
+The same damage also appears more than once *within* a lap: at 4 m/s a camera with a
+1 m field of view needs at least 4 frames per second to cover the belt without gaps, and
+any overlap between frames shows the damage twice. So de-duplication is needed inside a
+lap as well as across laps.
+
+### 8.3 The useful side of repetition
+
+Each lap is a new measurement of the same damage, taken by the same camera from the same
+angle. That gives three things a single inspection cannot:
+
+- **Growth.** The size of the damage per lap is a time series. A tear that lengthens lap
+  after lap is the urgent one, whatever its size today.
+- **Confirmation.** A detection seen once and never again was probably dirt, a shadow or
+  a false positive. Requiring a second lap before treating damage as confirmed removes most
+  single-frame errors at the cost of a 42-minute delay.
+- **Disappearance.** Damage that stops being seen has been repaired, covered (dirt,
+  carry-back, water), missed by the detector, or lost by the position estimate. These
+  cannot be told apart from images alone, so the entry is marked "not re-observed" after N
+  laps and kept. It becomes active again if the damage reappears.
+
+### 8.4 Position estimation and drift
+
+Belt position at the camera = (distance travelled since the reference mark passed the
+camera) modulo the loop length. Distance travelled is the integral of belt speed over time.
+
+Sources of error, all of which accumulate:
+
+- **Speed error.** A 1 % error in measured speed is 100 m of position error per lap.
+- **Slip.** A drive-pulley speed measurement over-reads when the belt slips. The speed must
+  come from a wheel riding on the belt, not from the motor.
+- **Loop length.** The belt stretches with load and temperature and the take-up moves. An
+  error in the assumed loop length shifts every position by that amount each lap.
+- **Stops and reversals.** Integration must use signed speed; a stopped belt shows the same
+  metre of belt for as long as it stands.
+
+Uncorrected, the error after a day (34 laps) at 1 % is 3.4 km: a third of the loop.
+Dead reckoning alone is unusable beyond a few laps.
+
+**The splice as a zero marker.** The belt joint passes the camera once per lap. Each time
+it is seen, the position is reset to zero and the lap counter increments, so error no
+longer accumulates across laps. Within a lap the error grows with distance from the
+splice (1 % of up to 10 km is still 100 m at the far end), so:
+
+- the matching tolerance should grow with distance travelled since the last marker, and
+- the time between two splice sightings gives the true lap time, from which the speed
+  scale (or loop length) is corrected for the next lap.
+
+Complications:
+
+- A belt this long is made of many rolls and has many splices, not one. One of them (or a
+  purpose-made mark, or an RFID tag vulcanised into the belt) must be identifiable as *the*
+  reference. This design assumes one identifiable reference marker per lap (assumption A6).
+- **A splice looks like damage** to a detector: a straight line across the belt, often with
+  a raised edge. Known splice positions must be excluded from the damage registry, and a
+  splice that changes appearance is itself a maintenance finding (splice failure is a
+  common way belts break).
+- If the marker is missed on one lap, the system falls back to dead reckoning for that lap
+  and the tolerance widens.
+
+### 8.5 Same damage or new damage?
+
+A detection is matched against the registry on three things together:
+
+1. **Position along the belt**, within a tolerance.
+2. **Class.** A tear does not become a hole between laps (the detector's class confusion
+   makes this imperfect, see below).
+3. **Appearance** of the cropped region.
+
+Why position alone is not enough: two different defects can sit within the position
+tolerance of each other, and with drift the tolerance has to be metres wide. Why
+appearance alone is not enough: the same damage looks different every lap (dust, wet belt,
+lighting, material stuck in it, and real growth), and two cracks can look alike.
+
+Further rules that follow:
+
+- **One to one per lap.** A registry entry can be matched by at most one detection per lap,
+  and one detection by one entry. Otherwise two neighbouring tears collapse into one.
+- **Position across the belt** (left edge, centre, right edge) is a second coordinate that
+  is cheap and stable, and separates defects that are close along the belt.
+- **Growth changes appearance and size on purpose.** The appearance check has to tolerate a
+  damage that is larger than last lap, and must compare against the *latest* sighting, not
+  the first.
+- **Merging and splitting.** Two tears that grow into one, or one detection box that
+  becomes two, break the one-to-one rule. This is not solved here.
+
+### 8.6 What the camera cannot see
+
+- One camera sees one face of the belt. Damage on the other cover, or inside the carcass,
+  is invisible to it.
+- On the carry side the belt is under material. A camera for belt condition belongs on the
+  return side, after the discharge and a belt cleaner, where the carry cover faces down and
+  is as clean as it gets.
+- Pixel size to millimetres needs camera calibration. Without it, growth can be reported
+  only relative to the first sighting, not in millimetres.
+
+### 8.7 What will be built, and what stays unsolved
+
+Built in `vision/belt_registry.py` (after this analysis is agreed):
+
+- Every detection gets a belt-loop position and a lap number.
+- Matching by position within tolerance, same class and an appearance check on the crop;
+  one-to-one per lap; match against the latest sighting.
+- A match updates the entry (last seen, lap count, size history); no match creates one.
+- Entries not seen for N laps are marked "not re-observed", never deleted, and can return.
+- The dashboard shows unique damages with a growth trend, not raw detections.
+- A reference-marker event resets position and increments the lap.
+
+Simulated, and said so: the dataset is unrelated still images, not footage of one belt.
+`scripts/seed_demo.py` places a set of images at fixed belt positions and replays them over
+several laps with changes in brightness, shift and blur, with speed jitter and with clean
+frames in between. This tests the registry logic. It does not test whether the appearance
+check survives real dust, real lighting changes or real growth.
+
+Unsolved without a real encoder, real camera calibration and real multi-lap footage:
+
+- Real drift behaviour and the right tolerance. The tolerance here is a configured number.
+- Detecting the reference splice from images. In the simulation the marker event is given.
+- Growth in physical units.
+- Merging and splitting of damages, and damage wider than one frame.
+- Belt repairs that change the loop length (a section cut out and re-spliced shifts every
+  position after it).
+- Class confusion by the detector between laps.
