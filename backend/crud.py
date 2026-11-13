@@ -8,11 +8,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, update
 from sqlalchemy.orm import Session
 
 from backend.config import SIGNAL_NAMES, settings
-from backend.models import QualityEvent, Reading, Sensor
+from backend.models import Anomaly, Prediction, QualityEvent, Reading, Sensor
 from backend.validation import CleanReading, Issue, validate_item
 
 STATUS_NORMAL = "normal"
@@ -330,3 +330,162 @@ def quality_summary(db: Session, recent_limit: int = 50) -> dict[str, Any]:
     }
     recent = list(db.scalars(select(QualityEvent).order_by(QualityEvent.id.desc()).limit(recent_limit)))
     return {"totals": totals, "by_reason": dict(sorted(by_reason.items())), "per_sensor": sensors, "recent_events": recent}
+
+
+# --------------------------------------------------------------------------------------
+# Analysis support: reading frames, scores, anomalies, predictions
+# --------------------------------------------------------------------------------------
+
+RISK_ORDER = ["Low", "Medium", "High", "Critical"]
+
+
+def reading_rows(db: Session, sensor_ids: list[str], since: datetime) -> list[tuple]:
+    """Readings of the given sensors from `since` on, ordered by sensor and data time.
+
+    Returns plain tuples: (id, sensor_id, timestamp, temperature, vibration, speed, load,
+    current, flags, is_anomaly, severity).
+    """
+    stmt = (
+        select(
+            Reading.id,
+            Reading.sensor_id,
+            Reading.timestamp,
+            *(getattr(Reading, s) for s in SIGNAL_NAMES),
+            Reading.flags,
+            Reading.is_anomaly,
+            Reading.severity,
+        )
+        .where(Reading.sensor_id.in_(sensor_ids), Reading.timestamp >= since)
+        .order_by(Reading.sensor_id, Reading.timestamp)
+    )
+    # Run on the connection: this is read thousands of rows at a time and needs no ORM objects.
+    return db.connection().execute(stmt).all()
+
+
+def save_scores(db: Session, rows: list[dict[str, Any]]) -> None:
+    """rows: [{"id":, "anomaly_score":, "is_anomaly":, "severity":}]"""
+    if rows:
+        db.execute(update(Reading), rows)
+
+
+def active_anomaly(db: Session, sensor_id: str) -> Anomaly | None:
+    return db.scalars(
+        select(Anomaly).where(Anomaly.sensor_id == sensor_id, Anomaly.status == "active").order_by(Anomaly.id.desc()).limit(1)
+    ).first()
+
+
+def open_anomaly(db: Session, sensor: Sensor, ts: datetime, anomaly_type: str, severity: str, score: float) -> Anomaly:
+    anomaly = Anomaly(
+        sensor_id=sensor.id,
+        station_km=sensor.station_km,
+        started_at=ts,
+        last_anomalous_at=ts,
+        status="active",
+        anomaly_type=anomaly_type,
+        severity=severity,
+        worst_score=score,
+        reading_count=1,
+    )
+    db.add(anomaly)
+    return anomaly
+
+
+def extend_anomaly(anomaly: Anomaly, ts: datetime, anomaly_type: str, severity: str, score: float) -> None:
+    anomaly.last_anomalous_at = max(anomaly.last_anomalous_at, ts)
+    anomaly.reading_count += 1
+    if RISK_ORDER.index(severity) > RISK_ORDER.index(anomaly.severity):
+        anomaly.severity, anomaly.anomaly_type = severity, anomaly_type
+    anomaly.worst_score = min(anomaly.worst_score, score)
+
+
+def clear_anomaly(anomaly: Anomaly) -> None:
+    anomaly.status = "cleared"
+    anomaly.ended_at = anomaly.last_anomalous_at
+
+
+def list_anomalies(
+    db: Session,
+    sensor_id: str | None = None,
+    severity: str | None = None,
+    status: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> tuple[int, list[Anomaly]]:
+    """Anomalies, newest first. `start` / `end` select anomalies that overlap that period."""
+    conditions = []
+    if sensor_id:
+        conditions.append(Anomaly.sensor_id == sensor_id)
+    if severity:
+        conditions.append(Anomaly.severity == severity)
+    if status:
+        conditions.append(Anomaly.status == status)
+    if start is not None:
+        conditions.append(Anomaly.last_anomalous_at >= start)
+    if end is not None:
+        conditions.append(Anomaly.started_at <= end)
+    total = db.scalar(select(func.count(Anomaly.id)).where(*conditions)) or 0
+    rows = db.scalars(
+        select(Anomaly).where(*conditions).order_by(Anomaly.started_at.desc(), Anomaly.id.desc()).limit(limit).offset(offset)
+    )
+    return total, list(rows)
+
+
+def add_prediction(db: Session, sensor: Sensor, created_at: datetime, assessment: Any) -> Prediction:
+    prediction = Prediction(
+        sensor_id=sensor.id,
+        station_km=sensor.station_km,
+        created_at=created_at,
+        failure_mode=assessment.failure_mode,
+        failure_mode_label=assessment.failure_mode_label,
+        risk_level=assessment.risk_level,
+        eta_low_h=assessment.eta_low_h,
+        eta_high_h=assessment.eta_high_h,
+        confidence=assessment.confidence,
+        reason=assessment.reason,
+        details=json.dumps(assessment.details, default=str),
+    )
+    db.add(prediction)
+    return prediction
+
+
+def latest_predictions(db: Session) -> dict[str, Prediction]:
+    """The newest prediction of every sensor, keyed by sensor id."""
+    newest = select(func.max(Prediction.id)).group_by(Prediction.sensor_id)
+    return {p.sensor_id: p for p in db.scalars(select(Prediction).where(Prediction.id.in_(newest)))}
+
+
+def prediction_history(db: Session, sensor_id: str, limit: int, offset: int) -> tuple[int, list[Prediction]]:
+    total = db.scalar(select(func.count(Prediction.id)).where(Prediction.sensor_id == sensor_id)) or 0
+    rows = db.scalars(
+        select(Prediction)
+        .where(Prediction.sensor_id == sensor_id)
+        .order_by(Prediction.created_at.desc(), Prediction.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return total, list(rows)
+
+
+def station_statuses(db: Session, sensors: list[Sensor], now: datetime) -> dict[str, str]:
+    """Status of each station, most urgent first:
+
+    offline            nothing received within the timeout (nothing else can be judged)
+    predicted failure  the latest prediction has risk High or Critical
+    abnormal           an anomaly is active now
+    normal             none of the above
+    """
+    active = set(db.scalars(select(Anomaly.sensor_id).where(Anomaly.status == "active")))
+    predictions = latest_predictions(db)
+    statuses = {}
+    for sensor in sensors:
+        if base_status(sensor, now) == STATUS_OFFLINE:
+            statuses[sensor.id] = STATUS_OFFLINE
+        elif sensor.id in predictions and predictions[sensor.id].risk_level in ("High", "Critical"):
+            statuses[sensor.id] = STATUS_PREDICTED_FAILURE
+        elif sensor.id in active:
+            statuses[sensor.id] = STATUS_ABNORMAL
+        else:
+            statuses[sensor.id] = STATUS_NORMAL
+    return statuses

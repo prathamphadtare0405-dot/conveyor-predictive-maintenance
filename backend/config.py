@@ -117,12 +117,15 @@ class Settings:
     sim_fault_rate: float = field(default_factory=lambda: _float("SIM_FAULT_RATE", 0.5))
     sim_messy_rate: float = field(default_factory=lambda: _float("SIM_MESSY_RATE", 0.03))
     sim_seed: int = field(default_factory=lambda: _int("SIM_SEED", 42))
+    sim_plant_seed: int = field(default_factory=lambda: _int("SIM_PLANT_SEED", 7))
 
     # Anomaly detection and prediction
     ml_model_dir: Path = field(default_factory=lambda: _path("ML_MODEL_DIR", "ml/models"))
-    rolling_window: int = field(default_factory=lambda: _int("ROLLING_WINDOW", 24))
-    iforest_contamination: float = field(default_factory=lambda: _float("IFOREST_CONTAMINATION", 0.02))
+    rolling_window: int = field(default_factory=lambda: _int("ROLLING_WINDOW", 360))
+    iforest_contamination: float = field(default_factory=lambda: _float("IFOREST_CONTAMINATION", 0.002))
     trend_lookback_min: float = field(default_factory=lambda: _float("TREND_LOOKBACK_MIN", 180.0))
+    anomaly_confirm_readings: int = field(default_factory=lambda: _int("ANOMALY_CONFIRM_READINGS", 3))
+    prediction_interval_s: float = field(default_factory=lambda: _float("PREDICTION_INTERVAL_S", 60.0))
 
     # Vision
     vision_weights: Path = field(default_factory=lambda: _path("VISION_WEIGHTS", "vision/models/belt_damage.pt"))

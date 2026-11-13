@@ -127,3 +127,60 @@ every 5 seconds that is two readings per second, which a single process handles 
 real scale (thousands of sensors, or sub-second sampling) ingest would write to a queue,
 analysis would run in separate workers, and readings would go to a time-series database
 instead of SQLite.
+
+## 6. How anomaly detection works
+
+Every stored reading is prepared the same way in training, evaluation and live operation
+(`ml/preprocessing.py`):
+
+1. **Imputation.** A missing or blanked value takes the station's last valid value if that
+   is at most 12 readings (1 minute) old; otherwise the median of healthy training data.
+2. **Baseline.** A linear fit on healthy data predicts temperature, vibration, speed and
+   current from belt load and hour of day. The residual (measured minus expected) is what a
+   fault changes; load swings and the daily temperature cycle are removed.
+3. **Rolling features** over the station's last 360 readings (30 minutes): mean, standard
+   deviation and slope of each signal, the raw values, and the mean residual. 24 features.
+
+A reading is anomalous if any of three rules fires (`ml/predict.py`):
+
+| Rule | Fires when | Catches |
+|------|------------|---------|
+| Forest | Isolation Forest score is below the lowest 0.2 % of healthy training scores | unusual combinations of signals |
+| Limit | a signal is beyond its warning limit | anything already outside operating limits |
+| Drift | the 30-minute mean residual of a signal is outside the healthy band by 4 standard deviations | slow drift of one signal, well before a limit |
+
+The forest is trained on healthy readings only. The drift rule was added after testing
+showed that the forest does not react to a single signal leaving its training range
+(DECISIONS D31).
+
+An **anomaly** is opened after three anomalous readings in a row, or immediately at
+severity High or Critical. It carries a type (the signals that drove it, strongest first),
+the severity of its worst reading, the station and kilometre, and its start time. It stays
+active until the station has been normal for 120 seconds of data time, then it is cleared.
+
+## 7. How failure prediction works: what, where, when
+
+`ml/risk.py` runs once a minute (data time) per station on the last 3 hours of readings.
+
+- **Where** is the station: its id and kilometre position.
+- **What.** Each gradual failure mode has a primary signal: vibration for idler/bearing
+  wear, belt speed for slip, temperature under sustained load above 100 % for overload. A
+  mode is a candidate when its primary signal has a clear trend towards the failure limit
+  or is already outside the healthy band. Among candidates the one whose primary signal has
+  moved furthest towards its limit is reported.
+- **When.** A straight line is fitted to one-minute medians of the primary signal's
+  residual. The trend is used only if it heads for the limit, fits (R² at least 0.5) and
+  has covered at least 8 % of the distance from normal to failure. The time to the limit is
+  reported as a window: the early end uses the faster of "slope plus two standard errors"
+  and the slope of the most recent third; the late end uses the slope minus two standard
+  errors. If there is no usable trend the answer is "no estimate".
+- **Confidence.** High: R² at least 0.85 on at least 2 hours of history. Medium: R² at
+  least 0.7 on at least 1 hour. Otherwise Low.
+- **Risk** is the highest of: time (early end within 2 h Critical, 8 h High, 24 h Medium),
+  level (how far the signal has moved towards the limit), and the anomaly record of the
+  last hour. Every prediction stores a sentence-form reason with the numbers used.
+
+Station status, most urgent first: `offline`, `predicted failure` (risk High or Critical),
+`abnormal` (an anomaly is active), `normal`.
+
+Measured results and their limits are in [evaluation_results.md](evaluation_results.md).

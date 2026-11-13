@@ -195,3 +195,98 @@ Scope cuts are logged here too, with the reason.
 ### D27. Anomaly, prediction and vision tables and routes are added in their own phases
 - Phase 3 covers ingest, storage, sensors, data quality, summary and health. Station status
   is `normal` or `offline` for now; `abnormal` and `predicted failure` arrive with phase 4.
+
+---
+
+## Phase 4: anomaly detection and prediction
+
+### D28. The model is trained on healthy readings only
+- **Options:** (A) train on rows the simulator labels healthy; (B) train on everything, unlabelled.
+- **Choice:** A. The assistant recommended A; the author asked which was simpler and accepted it.
+- **Reason:** about 20 % of the backfill is fault data, far too much for an Isolation Forest
+  to treat as rare. A corresponds to training on a commissioning period signed off as
+  fault-free. The labels are used only to pick training rows; evaluation uses a separate run.
+
+### D29. Rolling window of 360 readings (30 minutes), not a couple of minutes
+- **Reason:** faults develop over hours. Over 2 minutes the slope of a noisy signal is
+  noise; over 30 minutes a drift of a few tenths of a unit per hour is visible.
+
+### D30. A baseline removes what load and time of day explain
+- **What:** a least-squares fit on healthy data predicts temperature, vibration, speed and
+  current from load (raw and 10-minute mean) and hour of day; each station has its own
+  offset. Features and trend fits use the residual (measured minus expected).
+- **Alternative:** work on raw signals. Rejected: temperature rises several degrees every
+  morning and with every load swing, and a trend fit on the raw signal reads that as a fault.
+- **Limit:** hour of day stands in for ambient temperature. A real installation should
+  measure ambient temperature.
+
+### D31. Three rules decide whether a reading is anomalous, and the forest is the weakest
+- **Found during testing:** the Isolation Forest did not flag a bearing whose vibration had
+  doubled but was still below the warning limit. A tree can only split inside the range of
+  its training data, so a value far outside it scores the same as the most extreme healthy
+  value.
+- **Options:** loosen the forest's threshold (more false alarms everywhere); add a rule
+  for exactly this case.
+- **Choice:** keep the forest as specified and add a drift rule: the rolling mean of the
+  load-compensated residual is outside the healthy band by 4 healthy standard deviations.
+  Warning-limit violations are the third rule.
+- **Result (see `docs/evaluation_results.md`):** recall on fault readings went from 0.71 to
+  0.92 with the same false-alarm rate. The forest alone, where neither other rule fired,
+  flagged 0.2 % of fault readings. The report states this; it is not hidden.
+
+### D32. An anomaly opens after 3 anomalous readings in a row, or at once if severity is High or Critical
+- **Reason:** one odd reading should not open an anomaly, but a limit violation should not wait.
+- **Cost:** a single-reading spike that stays inside limits is deliberately ignored.
+
+### D33. Severity
+- Low: forest only, just below threshold. Medium: forest well below threshold, or drift.
+  High: forest far below threshold, or a signal beyond its warning limit. Critical: a signal
+  at or beyond its failure limit.
+
+### D34. Prediction is rules and straight-line fits, not a learned model
+- **Options:** train a regressor on the simulator's time-to-failure labels; extrapolate trends.
+- **Choice:** trend extrapolation in `ml/risk.py`.
+- **Reason:** a regressor trained on simulator labels would learn the simulator. Every
+  number the trend method reports can be recomputed by hand from the chart, and the reason
+  text says which numbers were used.
+- **Known weakness:** real wear accelerates, and a straight line then over-estimates the
+  time left. The early end of the window uses the slope of the most recent third of the
+  history to compensate, which is only partly enough: in the evaluation the failure came
+  sooner than the window in about a quarter of estimates, mostly when more than 4 hours remained.
+
+### D35. Risk level is the highest of three readings of the situation
+- Time (early end of the window: 2 h Critical, 8 h High, 24 h Medium), level (how far the
+  primary signal has moved from normal to the failure limit), and the anomaly record of the
+  last hour. A low-confidence time estimate counts one level lower.
+- **Consequence:** risk stays raised for up to an hour after a repair, because the anomaly
+  record still counts.
+
+### D36. Evaluation data is the same conveyor on different days
+- **Found during evaluation:** with a different simulator seed the false-alarm rate was 16
+  times the design value. The seed also changed each station's permanent sensor offsets, so
+  the test data came from a different conveyor than the training data.
+- **Fix:** a separate `plant_seed` fixes the station offsets; `seed` changes load, noise,
+  faults and messy data. Training, evaluation and demo share the plant seed.
+- The first evaluation run also contained no belt-slip fault. One fault of each mode is now
+  injected at the start of the evaluation run, on top of the random ones.
+
+### D37. The thresholds in `ml/risk.py` were set before looking at evaluation results and not tuned afterwards
+- The drift rule (D31) and the plant seed (D36) were changed after seeing evaluation output,
+  because they fixed defects. The numeric thresholds of the predictor were left alone, so the
+  window accuracy in the report is not the result of fitting to the test run.
+
+### D38. Live analysis speed
+- Analysis runs inside the ingest request and takes about 160 ms per request on the
+  development laptop, plus about 40 ms per prediction. The simulator groups readings so that
+  it sends at most two requests per second. With `--speedup 60` the measured rate was about
+  36 times real time; the simulator slows down and loses nothing.
+- **Not done:** an in-memory cache of each station's recent readings would remove most of
+  the cost. Left out because real-time operation (one batch every 5 seconds) is nowhere
+  near the limit.
+
+### D39. Late readings older than 10 minutes are stored but not scored
+- Scoring them would mean rebuilding old rolling windows for an alarm about the past.
+
+### D40. `ml/live.py` is an addition to the spec's file list
+- `ml/predict.py` holds the detector with no database access; `ml/live.py` connects
+  detector and predictor to the backend's tables.

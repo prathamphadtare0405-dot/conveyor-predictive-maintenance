@@ -16,7 +16,7 @@ from fastapi import FastAPI
 
 from backend.config import settings
 from backend.database import init_db
-from backend.routes import sensors, system
+from backend.routes import anomalies, predictions, sensors, system
 
 logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -34,4 +34,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(sensors.router)
+app.include_router(anomalies.router)
+app.include_router(predictions.router)
 app.include_router(system.router)

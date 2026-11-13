@@ -53,6 +53,10 @@ class Reading(Base):
     flags: Mapped[str] = mapped_column(String(255), default="")
     arrived_late: Mapped[bool] = mapped_column(Boolean, default=False)
     received_at: Mapped[datetime] = mapped_column(DateTime)
+    # Filled by the analysis step. NULL means the reading was not scored (no model, or it arrived too late).
+    anomaly_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_anomaly: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    severity: Mapped[str] = mapped_column(String(10), default="")
 
 
 class QualityEvent(Base):
@@ -77,3 +81,47 @@ class QualityEvent(Base):
     field: Mapped[str] = mapped_column(String(32), default="")
     detail: Mapped[str] = mapped_column(Text, default="")
     raw: Mapped[str] = mapped_column(Text, default="")  # the offending payload, truncated
+
+
+class Anomaly(Base):
+    """A period during which a station's readings were anomalous.
+
+    It is `active` from the first confirmed anomalous reading until the station has been
+    back to normal for the configured clear period; then it is `cleared` and `ended_at`
+    is set to the last anomalous reading. Severity and type are those of the worst reading.
+    """
+
+    __tablename__ = "anomalies"
+    __table_args__ = (Index("ix_anomaly_sensor_status", "sensor_id", "status"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sensor_id: Mapped[str] = mapped_column(ForeignKey("sensors.id"))
+    station_km: Mapped[float] = mapped_column(Float)
+    started_at: Mapped[datetime] = mapped_column(DateTime)  # data time
+    last_anomalous_at: Mapped[datetime] = mapped_column(DateTime)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(10), default="active")  # active | cleared
+    anomaly_type: Mapped[str] = mapped_column(String(160))
+    severity: Mapped[str] = mapped_column(String(10))
+    worst_score: Mapped[float] = mapped_column(Float)
+    reading_count: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class Prediction(Base):
+    """One run of the failure predictor for one station: what, where, when, and why."""
+
+    __tablename__ = "predictions"
+    __table_args__ = (Index("ix_prediction_sensor_time", "sensor_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sensor_id: Mapped[str] = mapped_column(ForeignKey("sensors.id"))
+    station_km: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime)  # data time of the newest reading used
+    failure_mode: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    failure_mode_label: Mapped[str] = mapped_column(String(48))
+    risk_level: Mapped[str] = mapped_column(String(10))
+    eta_low_h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    eta_high_h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    reason: Mapped[str] = mapped_column(Text)
+    details: Mapped[str] = mapped_column(Text, default="{}")  # JSON: levels, trend fits, risk parts

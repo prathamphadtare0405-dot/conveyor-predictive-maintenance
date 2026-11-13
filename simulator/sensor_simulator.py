@@ -54,6 +54,7 @@ CSV_FIELDS = PAYLOAD_FIELDS + TRUTH_FIELDS
 POINT_MESS_KINDS = ("missing_field", "nan", "out_of_range", "wrong_type", "duplicate", "out_of_order")
 EPISODE_MESS_KINDS = ("stuck", "silent")
 ALL_MESS_KINDS = POINT_MESS_KINDS + EPISODE_MESS_KINDS
+MIN_POST_GAP_S = 0.5  # live mode: shortest real time between two requests to the backend
 
 
 def iso_utc(epoch_s: float) -> str:
@@ -80,6 +81,10 @@ class SimConfig:
     messy_rate: float = settings.sim_messy_rate
     messy_kinds: tuple[str, ...] = ALL_MESS_KINDS
     seed: int = settings.sim_seed
+    # Fixes what belongs to the installation and not to the run: each station's small
+    # permanent offsets. Two runs with different `seed` but the same `plant_seed` are the
+    # same conveyor on different days.
+    plant_seed: int = settings.sim_plant_seed
 
     def __post_init__(self) -> None:
         if self.sensors < 1:
@@ -143,16 +148,18 @@ class Station:
     LOAD_NOISE_TIME_CONSTANT_S = 600.0
     NOISE_SD = {"temperature": 0.5, "vibration": 0.12, "speed": 0.015, "load": 0.8, "current": 3.0}
 
-    def __init__(self, index: int, km: float, cfg: SimConfig, feed: FeedProfile, rng: np.random.Generator) -> None:
+    def __init__(
+        self, index: int, km: float, cfg: SimConfig, feed: FeedProfile, rng: np.random.Generator, plant_rng: np.random.Generator
+    ) -> None:
         self.sensor_id = settings.sensor_id(index)
         self.km = km
         self.cfg = cfg
         self.feed = feed
         self.rng = rng
         # Small fixed differences between stations, so no two sensors read identically.
-        self.temp_offset = float(rng.normal(0.0, 1.5))
-        self.vib_offset = float(rng.normal(0.0, 0.2))
-        self.current_offset = float(rng.normal(0.0, 4.0))
+        self.temp_offset = float(plant_rng.normal(0.0, 1.5))
+        self.vib_offset = float(plant_rng.normal(0.0, 0.2))
+        self.current_offset = float(plant_rng.normal(0.0, 4.0))
         self.load_noise = 0.0
         self.temp_state: float | None = None
         self.fault: GradualFault | None = None
@@ -365,8 +372,10 @@ class ConveyorSimulator:
         self.feed = FeedProfile(np.random.default_rng(seeds[0]))
         self.mess = MessInjector(cfg, np.random.default_rng(seeds[1]))
         positions = [round(cfg.length_km / cfg.sensors * (i + 0.5), 3) for i in range(cfg.sensors)]
+        plant = np.random.SeedSequence(cfg.plant_seed).spawn(cfg.sensors)
         self.stations = [
-            Station(i, positions[i], cfg, self.feed, np.random.default_rng(seeds[i + 2])) for i in range(cfg.sensors)
+            Station(i, positions[i], cfg, self.feed, np.random.default_rng(seeds[i + 2]), np.random.default_rng(plant[i]))
+            for i in range(cfg.sensors)
         ]
         self.tick_index = 0
 
@@ -617,12 +626,20 @@ def run_live(
     wall_start = time.monotonic()
     next_tick = wall_start
     next_report = wall_start + 10.0
+    # With time acceleration, ticks come faster than it is worth making requests. Readings
+    # are grouped so that at most one request is sent per MIN_POST_GAP_S of real time.
+    unsent: list[dict[str, Any]] = []
+    last_post = 0.0
     try:
         while duration_s is None or time.monotonic() - wall_start < duration_s:
             emissions = sim.tick(t)
             _record(emissions, sink, stats)
             if poster is not None:
-                poster.submit([e.payload for e in emissions])
+                unsent.extend(e.payload for e in emissions)
+                if time.monotonic() - last_post >= MIN_POST_GAP_S:
+                    poster.submit(unsent)
+                    unsent = []
+                    last_post = time.monotonic()
             stats.ticks += 1
             t += interval
             now = time.monotonic()
@@ -648,7 +665,7 @@ def run_live(
     tail = sim.mess.flush()
     _record(tail, sink, stats)
     if poster is not None:
-        poster.submit([e.payload for e in tail])
+        poster.submit(unsent + [e.payload for e in tail])
         _drain(poster, max_wait_s=5.0)
     return stats
 

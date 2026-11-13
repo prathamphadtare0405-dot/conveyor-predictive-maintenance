@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -15,18 +16,23 @@ from backend.config import settings
 from backend.database import get_db
 from backend.models import Sensor
 from backend.validation import to_naive_utc
+from ml.live import analyser
+
+log = logging.getLogger("backend.sensors")
 
 router = APIRouter(prefix="/api/sensors", tags=["sensors"])
 
 MAX_PROBLEMS_RETURNED = 100
 
 
-def sensor_out(db: Session, sensor: Sensor, now: datetime) -> dict[str, Any]:
+def sensor_out(db: Session, sensor: Sensor, now: datetime, status: str, prediction=None) -> dict[str, Any]:
     latest = crud.latest_reading(db, sensor.id)
     return {
         "sensor_id": sensor.id,
         "station_km": sensor.station_km,
-        "status": crud.base_status(sensor, now),
+        "status": status,
+        "active_anomaly": crud.active_anomaly(db, sensor.id),
+        "prediction": prediction,
         "last_seen_at": sensor.last_seen_at,
         "first_seen_at": sensor.first_seen_at,
         "seconds_since_last_message": round((now - sensor.last_seen_at).total_seconds(), 1),
@@ -55,6 +61,13 @@ def post_readings(payload: Any = Body(...), db: Session = Depends(get_db)):
         raise HTTPException(422, f"Batch of {len(items)} readings exceeds the limit of {settings.max_batch_size}.")
 
     result = crud.ingest_readings(db, items)
+    # The readings are committed at this point. If analysis fails, the data is still safe
+    # and the failure is logged; ingest never fails because of the model.
+    try:
+        analyser.run(db, result.stored)
+    except Exception:
+        db.rollback()
+        log.exception("Analysis failed for a batch of %d readings; the readings themselves are stored.", result.received)
     body = schemas.IngestResponse(
         received=result.received,
         accepted=result.accepted,
@@ -82,7 +95,10 @@ def post_readings(payload: Any = Body(...), db: Session = Depends(get_db)):
 @router.get("", response_model=list[schemas.SensorOut], summary="All sensor stations with status and latest reading")
 def list_sensors(db: Session = Depends(get_db)):
     now = crud.utcnow()
-    return [sensor_out(db, s, now) for s in crud.list_sensors(db)]
+    sensors = crud.list_sensors(db)
+    statuses = crud.station_statuses(db, sensors, now)
+    predictions = crud.latest_predictions(db)
+    return [sensor_out(db, s, now, statuses[s.id], predictions.get(s.id)) for s in sensors]
 
 
 @router.get("/{sensor_id}", response_model=schemas.SensorDetail)
@@ -90,7 +106,9 @@ def get_sensor(sensor_id: str, db: Session = Depends(get_db)):
     sensor = crud.get_sensor(db, sensor_id)
     if sensor is None:
         raise HTTPException(404, f"Sensor {sensor_id!r} is not known.")
-    out = sensor_out(db, sensor, crud.utcnow())
+    now = crud.utcnow()
+    status = crud.station_statuses(db, [sensor], now)[sensor.id]
+    out = sensor_out(db, sensor, now, status, crud.latest_predictions(db).get(sensor.id))
     out["readings_stored"] = crud.reading_count(db, sensor_id)
     return out
 
