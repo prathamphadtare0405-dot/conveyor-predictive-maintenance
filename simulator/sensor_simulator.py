@@ -141,6 +141,7 @@ class Station:
 
     THERMAL_TIME_CONSTANT_S = 600.0  # housing temperature lags load and ambient changes
     LOAD_NOISE_TIME_CONSTANT_S = 600.0
+    NOISE_SD = {"temperature": 0.5, "vibration": 0.12, "speed": 0.015, "load": 0.8, "current": 3.0}
 
     def __init__(self, index: int, km: float, cfg: SimConfig, feed: FeedProfile, rng: np.random.Generator) -> None:
         self.sensor_id = settings.sensor_id(index)
@@ -200,16 +201,20 @@ class Station:
         self.temp_state += (target - self.temp_state) * min(1.0, dt / self.THERMAL_TIME_CONSTANT_S)
 
         values = {
-            "temperature": self.temp_state + rng.normal(0.0, 0.5),
-            "vibration": 2.0 + 0.008 * load + self.vib_offset + rng.normal(0.0, 0.12),
-            "speed": self.cfg.belt_speed_mps - 0.002 * (load - 70.0) + rng.normal(0.0, 0.015),
-            "load": load + rng.normal(0.0, 0.8),
-            "current": 120.0 + 2.0 * load + self.current_offset + rng.normal(0.0, 3.0),
+            "temperature": self.temp_state,
+            "vibration": 2.0 + 0.008 * load + self.vib_offset,
+            "speed": self.cfg.belt_speed_mps - 0.002 * (load - 70.0),
+            "load": load,
+            "current": 120.0 + 2.0 * load + self.current_offset,
         }
         if self.fault is not None:
             self.fault.adjust_signals(values, t, rng)
         if self.event is not None:
             self.event.adjust_signals(values, t)
+        # Measurement noise goes on last, so a failed component still gives a noisy
+        # reading and is not mistaken for a stuck sensor.
+        for name, sd in self.NOISE_SD.items():
+            values[name] += rng.normal(0.0, sd)
 
         values = {
             "temperature": round(values["temperature"], 2),

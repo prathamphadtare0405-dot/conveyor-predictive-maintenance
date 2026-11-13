@@ -80,3 +80,50 @@ Missing field, NaN, physically impossible value, wrong type (text in a numeric f
 duplicate reading, late (out-of-order) reading, a stuck signal repeating one value, and a
 station that goes silent. The default is 3 % of readings with a point corruption, plus
 occasional stuck and silent episodes. How the backend treats each one is in section 5.
+
+## 4. Architecture so far
+
+Sections on prediction, vision and the full architecture diagram are added with those phases.
+
+```mermaid
+flowchart LR
+    SIM[Sensor simulator] -- "POST /api/sensors/readings (batches)" --> VAL[validation.py<br/>reject or flag per item]
+    SIM -- "CSV with hidden ground truth" --> CSV[(data/*.csv)]
+    VAL --> CRUD[crud.py<br/>de-duplicate, order, stuck check]
+    CRUD --> DB[(SQLite<br/>sensors, readings, quality_events)]
+    DB --> API[GET endpoints]
+    API --> DASH[Dashboard]
+```
+
+## 5. How messy data is handled at the backend
+
+Every incoming reading ends in exactly one of four outcomes, and all but the first leave a
+row in the `quality_events` table, with the reason and the offending payload.
+
+| Outcome | When | Stored? |
+|---------|------|---------|
+| accepted | nothing wrong | yes |
+| flagged | the reading can be placed in time and has at least one usable signal | yes; bad signals are NULL |
+| rejected | no sensor id, no usable timestamp, no usable signal, or unknown sensor with no position | no |
+| duplicate | a reading for the same sensor and timestamp already exists | no; the first one is kept |
+
+| Problem in the data | What the backend does |
+|---------------------|-----------------------|
+| Missing signal, or null | Signal stored as NULL, flagged `missing_field` |
+| NaN or infinity | NULL, flagged `nan` |
+| Value outside what the instrument can report (for example -999 °C) | NULL, flagged `out_of_range` |
+| Text in a numeric field | NULL, flagged `wrong_type`. Plain numeric text ("45.2") is used and still flagged |
+| Missing or unreadable timestamp | Rejected: the reading cannot be placed |
+| Duplicate reading | Not stored again, logged |
+| Out-of-order reading | Stored at its own timestamp, marked `arrived_late`, logged. History queries always sort by reading time |
+| Stuck sensor | From the 6th identical value in a row, flagged `stuck`; value kept but ignored by analysis |
+| Silent station | Status becomes `offline` after 60 s without any message (arrival time) |
+
+`GET /api/data-quality` returns totals, counts per sensor and per reason, and the most
+recent log entries.
+
+Analysis runs inside the ingest request (added in phase 4). At 10 stations and one reading
+every 5 seconds that is two readings per second, which a single process handles easily. At
+real scale (thousands of sensors, or sub-second sampling) ingest would write to a queue,
+analysis would run in separate workers, and readings would go to a time-series database
+instead of SQLite.

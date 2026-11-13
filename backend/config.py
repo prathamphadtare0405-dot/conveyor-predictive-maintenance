@@ -108,6 +108,8 @@ class Settings:
     sensor_offline_timeout_s: float = field(default_factory=lambda: _float("SENSOR_OFFLINE_TIMEOUT_S", 60.0))
     anomaly_clear_after_s: float = field(default_factory=lambda: _float("ANOMALY_CLEAR_AFTER_S", 120.0))
     log_level: str = field(default_factory=lambda: _str("LOG_LEVEL", "INFO"))
+    stuck_repeat_count: int = field(default_factory=lambda: _int("STUCK_REPEAT_COUNT", 6))
+    max_batch_size: int = field(default_factory=lambda: _int("MAX_BATCH_SIZE", 5000))
 
     # Simulator
     sim_interval_s: float = field(default_factory=lambda: _float("SIM_INTERVAL_S", 5.0))

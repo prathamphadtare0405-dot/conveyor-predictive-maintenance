@@ -134,3 +134,64 @@ Scope cuts are logged here too, with the reason.
 ### D18. Backfill ends at the current time, so two runs with the same seed differ in timestamps
 - The fault sequence is the same for a given seed, but the day/night phase depends on when
   the run happens. `ml.evaluation` passes a fixed end time so its numbers are repeatable.
+
+---
+
+## Phase 3: backend
+
+### D19. Incoming readings are validated item by item, not by a strict request model
+- **Options:** a Pydantic model for the request body; a loose body checked by hand per item.
+- **Choice:** loose body, checked in `backend/validation.py`.
+- **Reason:** with a strict model, one NaN or one text value makes FastAPI refuse the whole
+  request, including the good readings in the batch. The requirement is to keep what is
+  usable and to record what was not.
+
+### D20. What is rejected and what is flagged
+- **Rejected (not stored):** not an object, no sensor id, no or unparseable timestamp, no
+  usable signal at all, or a first reading from an unknown sensor without a position.
+- **Flagged (stored, bad signal set to NULL):** missing field, NaN/infinity, text or other
+  wrong type, value outside the instrument's possible range, station_km disagreeing with
+  the registered position, a stuck signal.
+- **Reason for the line:** a reading needs a sensor and a time to be placed in the history.
+  Everything else can be missing and the rest is still information.
+- A number sent as text ("45.2") is used and still logged. Text with a unit ("45.2C") is
+  not parsed: guessing units is how silent errors start.
+
+### D21. Bad values become NULL at ingest; filling gaps is left to the analysis code
+- **Options:** impute at ingest and store the filled value; store NULL.
+- **Choice:** store NULL.
+- **Reason:** the database should say what was measured. An imputed value stored next to
+  real ones cannot be told apart later.
+
+### D22. HTTP status for batches
+- 200 when at least one item was stored or recognised as a duplicate; the body lists every
+  problem by item index. 422 when nothing in the request was usable (a single bad reading,
+  or a batch of only bad ones), with the same body.
+- **Alternative considered:** 207 Multi-Status. Rejected because few clients handle it and
+  the body already carries the per-item outcome.
+
+### D23. Duplicates: first reading wins
+- A second reading for the same (sensor, timestamp) is not stored and is logged, even if its
+  values differ. The alternative, last-write-wins, would let a late duplicate change history
+  that analysis has already used.
+
+### D24. Two clocks: data time and arrival time
+- History order, duplicates and analysis use the reading's own timestamp. "Offline" uses the
+  backend's clock at arrival. A late reading is stored at its own timestamp and marked
+  `arrived_late`; the station's "latest reading" stays the one with the newest timestamp.
+- **Not done:** readings with timestamps far in the future are not rejected, because the
+  simulator's time acceleration produces exactly that. A real deployment would reject them.
+
+### D25. Stuck-sensor rule
+- A signal that repeats exactly the same value 6 times in a row (configurable) is flagged
+  from the 6th reading on. The first five repeats are not flagged after the fact.
+- The value is kept in the database with the flag; the analysis code treats it as missing.
+- Late readings are skipped by this check, since "the readings just before" is ambiguous for them.
+
+### D26. `backend/validation.py` is an addition to the spec's file list
+- Validation is neither routing nor database work, and the training code needs the same
+  cleaning rules for CSV data, so it has its own module with no database dependency.
+
+### D27. Anomaly, prediction and vision tables and routes are added in their own phases
+- Phase 3 covers ingest, storage, sensors, data quality, summary and health. Station status
+  is `normal` or `offline` for now; `abnormal` and `predicted failure` arrive with phase 4.
