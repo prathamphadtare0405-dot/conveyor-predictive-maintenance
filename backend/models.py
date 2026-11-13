@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -125,3 +125,77 @@ class Prediction(Base):
     confidence: Mapped[str | None] = mapped_column(String(10), nullable=True)
     reason: Mapped[str] = mapped_column(Text)
     details: Mapped[str] = mapped_column(Text, default="{}")  # JSON: levels, trend fits, risk parts
+
+
+# --- vision ------------------------------------------------------------------------------
+# These tables have no sensor or station column on purpose. Damage is on the belt, which
+# moves; its position is metres along the belt loop, not a kilometre on the conveyor.
+
+
+class VisionFrame(Base):
+    """One image that was analysed, with where the belt was when it was taken."""
+
+    __tablename__ = "vision_frames"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime)
+    received_at: Mapped[datetime] = mapped_column(DateTime)
+    belt_position_m: Mapped[float] = mapped_column(Float)
+    lap: Mapped[int] = mapped_column(Integer)
+    position_source: Mapped[str] = mapped_column(String(16))  # client | dead_reckoning
+    detection_count: Mapped[int] = mapped_column(Integer, default=0)
+    image_path: Mapped[str] = mapped_column(String(255), default="")  # annotated image, relative to the vision folder
+
+
+class Damage(Base):
+    """One unique damage on the belt: the registry entry. See vision/belt_registry.py."""
+
+    __tablename__ = "damages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    damage_class: Mapped[str] = mapped_column(String(32))
+    position_m: Mapped[float] = mapped_column(Float)  # along the belt loop
+    lateral: Mapped[float] = mapped_column(Float)  # 0..1 across the frame
+    appearance_hash: Mapped[str] = mapped_column(String(128))
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime)
+    first_lap: Mapped[int] = mapped_column(Integer)
+    last_lap: Mapped[int] = mapped_column(Integer)
+    laps_seen: Mapped[int] = mapped_column(Integer, default=1)
+    sightings: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(16), default="active")  # active | not re-observed
+    best_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    last_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    image_path: Mapped[str] = mapped_column(String(255), default="")  # latest annotated frame
+    # Appearance of the latest sighting, for matching the next one (vision/appearance.py):
+    # a small grey PNG of the box plus margin, and where the box sits inside it.
+    context_png: Mapped[bytes] = mapped_column(LargeBinary, default=b"")
+    ctx_x1: Mapped[int] = mapped_column(Integer, default=0)
+    ctx_y1: Mapped[int] = mapped_column(Integer, default=0)
+    ctx_x2: Mapped[int] = mapped_column(Integer, default=0)
+    ctx_y2: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class VisionDetection(Base):
+    """One raw detection in one frame. Many detections belong to one damage."""
+
+    __tablename__ = "vision_detections"
+    __table_args__ = (Index("ix_detection_damage_lap", "damage_id", "lap"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    frame_id: Mapped[int] = mapped_column(ForeignKey("vision_frames.id"))
+    damage_id: Mapped[int] = mapped_column(ForeignKey("damages.id"))
+    captured_at: Mapped[datetime] = mapped_column(DateTime)
+    belt_position_m: Mapped[float] = mapped_column(Float)
+    lap: Mapped[int] = mapped_column(Integer)
+    damage_class: Mapped[str] = mapped_column(String(32))
+    confidence: Mapped[float] = mapped_column(Float)
+    x1: Mapped[float] = mapped_column(Float)
+    y1: Mapped[float] = mapped_column(Float)
+    x2: Mapped[float] = mapped_column(Float)
+    y2: Mapped[float] = mapped_column(Float)
+    image_width: Mapped[int] = mapped_column(Integer)
+    image_height: Mapped[int] = mapped_column(Integer)
+    area_fraction: Mapped[float] = mapped_column(Float)
+    lateral: Mapped[float] = mapped_column(Float)
+    is_new_damage: Mapped[bool] = mapped_column(Boolean, default=False)

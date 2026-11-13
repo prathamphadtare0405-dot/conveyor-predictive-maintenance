@@ -74,4 +74,6 @@ def dashboard_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
         "latest_reading_time": newest.isoformat(timespec="milliseconds") + "Z" if newest else None,
         "readings_stored": quality["totals"]["readings_stored"],
         "data_quality": quality["totals"],
+        "vision_model": "available" if settings.vision_weights.exists() else "not trained (run: python -m vision.train)",
+        "vision": crud.vision_summary(db),
     }

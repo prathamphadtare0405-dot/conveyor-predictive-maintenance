@@ -8,11 +8,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.orm import Session
 
 from backend.config import SIGNAL_NAMES, settings
-from backend.models import Anomaly, Prediction, QualityEvent, Reading, Sensor
+from backend.models import Anomaly, Damage, Prediction, QualityEvent, Reading, Sensor, VisionDetection, VisionFrame
 from backend.validation import CleanReading, Issue, validate_item
 
 STATUS_NORMAL = "normal"
@@ -489,3 +489,169 @@ def station_statuses(db: Session, sensors: list[Sensor], now: datetime) -> dict[
         else:
             statuses[sensor.id] = STATUS_NORMAL
     return statuses
+
+
+# --------------------------------------------------------------------------------------
+# Vision: frames, raw detections and the damage registry
+# --------------------------------------------------------------------------------------
+
+
+def first_frame(db: Session) -> VisionFrame | None:
+    return db.scalars(select(VisionFrame).order_by(VisionFrame.id).limit(1)).first()
+
+
+def latest_frame(db: Session) -> VisionFrame | None:
+    return db.scalars(select(VisionFrame).order_by(VisionFrame.id.desc()).limit(1)).first()
+
+
+def list_damages(db: Session, status: str | None = None) -> list[Damage]:
+    stmt = select(Damage)
+    if status:
+        stmt = stmt.where(Damage.status == status)
+    return list(db.scalars(stmt.order_by(Damage.position_m)))
+
+
+def register_frame(
+    db: Session,
+    captured_at: datetime,
+    position_m: float,
+    lap: int,
+    position_source: str,
+    detections: list[Any],
+    hashes: list[str],
+    appearances: list[Any],
+    now: datetime | None = None,
+) -> tuple[VisionFrame, list[tuple[VisionDetection, Damage]]]:
+    """Store one analysed frame and put its detections through the damage registry.
+
+    Each detection either updates an existing damage or creates a new one; afterwards
+    damages that the camera has passed without seeing for too many laps are marked
+    "not re-observed". The matching rules are in vision/belt_registry.py; the appearance
+    comparison is the template comparison of vision/appearance.py.
+    """
+    from vision import appearance as appearance_module
+    from vision import belt_registry as registry
+
+    stored: dict[int, Any] = {}
+
+    def similarity(obs: Any, entry: Damage) -> float:
+        if not entry.context_png:
+            return 0.0
+        if entry.id not in stored:
+            stored[entry.id] = appearance_module.Appearance.decode(
+                entry.context_png, entry.ctx_x1, entry.ctx_y1, entry.ctx_x2, entry.ctx_y2
+            )
+        return appearance_module.similarity(obs.appearance, stored[entry.id])
+
+    def remember(damage: Damage, look: Any) -> None:
+        damage.context_png = look.encode()
+        damage.ctx_x1, damage.ctx_y1, damage.ctx_x2, damage.ctx_y2 = look.x1, look.y1, look.x2, look.y2
+
+    cfg = registry.RegistryConfig(similarity=similarity)
+    frame = VisionFrame(
+        captured_at=captured_at, received_at=now or utcnow(), belt_position_m=position_m, lap=lap,
+        position_source=position_source, detection_count=len(detections),
+    )
+    db.add(frame)
+    db.flush()
+
+    entries = list_damages(db)
+    observations = [
+        registry.Observation(
+            damage_class=d.damage_class, position_m=position_m, lap=lap, lateral=d.lateral, appearance_hash=h,
+            area_fraction=d.area_fraction, confidence=d.confidence, timestamp=captured_at, appearance=look,
+        )
+        for d, h, look in zip(detections, hashes, appearances)
+    ]
+    matches = registry.assign(observations, entries, cfg)
+
+    rows: list[tuple[VisionDetection, Damage]] = []
+    for det, obs, damage in zip(detections, observations, matches):
+        is_new = damage is None
+        if is_new:
+            damage = Damage(
+                damage_class=obs.damage_class, position_m=obs.position_m, lateral=obs.lateral, appearance_hash=obs.appearance_hash,
+                first_seen_at=obs.timestamp, last_seen_at=obs.timestamp, first_lap=obs.lap, last_lap=obs.lap,
+                laps_seen=1, sightings=1, status=registry.STATUS_ACTIVE, best_confidence=obs.confidence, last_confidence=obs.confidence,
+            )
+            remember(damage, obs.appearance)
+            db.add(damage)
+            db.flush()
+            entries.append(damage)
+        else:
+            registry.apply_sighting(damage, obs, cfg)
+            remember(damage, obs.appearance)  # the next lap is compared with the latest look
+        row = VisionDetection(
+            frame_id=frame.id, damage_id=damage.id, captured_at=captured_at, belt_position_m=position_m, lap=lap,
+            damage_class=det.damage_class, confidence=det.confidence, x1=det.x1, y1=det.y1, x2=det.x2, y2=det.y2,
+            image_width=det.image_width, image_height=det.image_height, area_fraction=det.area_fraction,
+            lateral=det.lateral, is_new_damage=is_new,
+        )
+        db.add(row)
+        rows.append((row, damage))
+
+    registry.update_statuses(entries, lap, position_m, cfg)
+    db.flush()
+    return frame, rows
+
+
+def list_detections(
+    db: Session, damage_id: int | None, lap: int | None, limit: int, offset: int
+) -> tuple[int, list[VisionDetection]]:
+    conditions = []
+    if damage_id is not None:
+        conditions.append(VisionDetection.damage_id == damage_id)
+    if lap is not None:
+        conditions.append(VisionDetection.lap == lap)
+    total = db.scalar(select(func.count(VisionDetection.id)).where(*conditions)) or 0
+    rows = db.scalars(select(VisionDetection).where(*conditions).order_by(VisionDetection.id.desc()).limit(limit).offset(offset))
+    return total, list(rows)
+
+
+def damage_size_history(db: Session) -> dict[int, list[dict[str, Any]]]:
+    """Per damage, one point per lap: the largest box and best confidence seen in that lap."""
+    history: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    stmt = (
+        select(
+            VisionDetection.damage_id,
+            VisionDetection.lap,
+            func.max(VisionDetection.area_fraction),
+            func.max(VisionDetection.confidence),
+            func.max(VisionDetection.captured_at),
+            func.count(VisionDetection.id),
+        )
+        .group_by(VisionDetection.damage_id, VisionDetection.lap)
+        .order_by(VisionDetection.damage_id, VisionDetection.lap)
+    )
+    for damage_id, lap, area, confidence, seen_at, count in db.execute(stmt):
+        history[damage_id].append(
+            {"lap": lap, "area_fraction": round(area, 5), "confidence": round(confidence, 3), "seen_at": seen_at, "detections": count}
+        )
+    return history
+
+
+def reset_vision(db: Session) -> dict[str, int]:
+    """Delete all frames, detections and damages (used to start a demo from an empty registry)."""
+    counts = {
+        "detections": db.execute(delete(VisionDetection)).rowcount,
+        "damages": db.execute(delete(Damage)).rowcount,
+        "frames": db.execute(delete(VisionFrame)).rowcount,
+    }
+    db.commit()
+    return counts
+
+
+def vision_summary(db: Session) -> dict[str, Any]:
+    latest = latest_frame(db)
+    by_status = dict(db.execute(select(Damage.status, func.count(Damage.id)).group_by(Damage.status)).all())
+    confirmed = db.scalar(select(func.count(Damage.id)).where(Damage.laps_seen >= 2)) or 0
+    return {
+        "confirmed_damages": confirmed,
+        "unconfirmed_damages": sum(by_status.values()) - confirmed,
+        "frames_analysed": db.scalar(select(func.count(VisionFrame.id))) or 0,
+        "raw_detections": db.scalar(select(func.count(VisionDetection.id))) or 0,
+        "unique_damages": sum(by_status.values()),
+        "damages_by_status": by_status,
+        "current_lap": latest.lap if latest else None,
+        "current_belt_position_m": round(latest.belt_position_m, 1) if latest else None,
+    }

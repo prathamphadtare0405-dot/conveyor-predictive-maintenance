@@ -1,7 +1,6 @@
 # Design document
 
-Status: this document grows phase by phase. Sections are added when the part they describe
-is designed, so everything written here matches code that exists.
+Sections were written as each part was designed, so everything here matches code that exists.
 
 ## 1. What is monitored, and why these signals
 
@@ -83,9 +82,9 @@ duplicate reading, late (out-of-order) reading, a stuck signal repeating one val
 station that goes silent. The default is 3 % of readings with a point corruption, plus
 occasional stuck and silent episodes. How the backend treats each one is in section 5.
 
-## 4. Architecture so far
+## 4. Ingest path
 
-Sections on prediction, vision and the full architecture diagram are added with those phases.
+The full architecture diagram is in section 10.
 
 ```mermaid
 flowchart LR
@@ -294,8 +293,10 @@ lighting, material stuck in it, and real growth), and two cracks can look alike.
 
 Further rules that follow:
 
-- **One to one per lap.** A registry entry can be matched by at most one detection per lap,
-  and one detection by one entry. Otherwise two neighbouring tears collapse into one.
+- **One to one within a frame.** Two boxes in the same image are two different things, so
+  a registry entry can take at most one of them. Otherwise two neighbouring tears collapse
+  into one. (Two frames of the same pass may show the same damage, so a second match in
+  the same lap is allowed and does not count as another lap.)
 - **Position across the belt** (left edge, centre, right edge) is a second coordinate that
   is cheap and stable, and separates defects that are close along the belt.
 - **Growth changes appearance and size on purpose.** The appearance check has to tolerate a
@@ -316,11 +317,11 @@ Further rules that follow:
 
 ### 8.7 What will be built, and what stays unsolved
 
-Built in `vision/belt_registry.py` (after this analysis is agreed):
+Built in `vision/belt_registry.py`:
 
 - Every detection gets a belt-loop position and a lap number.
 - Matching by position within tolerance, same class and an appearance check on the crop;
-  one-to-one per lap; match against the latest sighting.
+  one-to-one within a frame; match against the latest sighting.
 - A match updates the entry (last seen, lap count, size history); no match creates one.
 - Entries not seen for N laps are marked "not re-observed", never deleted, and can return.
 - The dashboard shows unique damages with a growth trend, not raw detections.
@@ -341,3 +342,72 @@ Unsolved without a real encoder, real camera calibration and real multi-lap foot
 - Belt repairs that change the loop length (a section cut out and re-spliced shifts every
   position after it).
 - Class confusion by the detector between laps.
+
+### 8.8 What the loop replay showed
+
+`scripts/seed_demo.py` was run against the trained detector: 7 test images placed on the
+belt, 7 laps after a calibration lap, 84 frames.
+
+- **Position.** The simulated speed sensor read 0.4 % high. After the calibration lap the
+  estimate stayed within 3.5 m of the true position; the tolerance is 5 to 10 m.
+- **Counting.** 45 detections became 10 registry entries. Two of the images contain two
+  cracks that the detector boxed separately in the same frame, so 9 entries is the right
+  answer and one damage was registered twice.
+- **Events.** The damage that was "repaired" after lap 2 ended as "not re-observed". The
+  one that appeared on lap 3 was first registered on lap 3.
+- **Growth.** The damage scripted to grow was reported as growing; box area was too noisy
+  to say by how much.
+- **A design change came out of it.** The first appearance check (a hash of the box crop)
+  produced 19 entries, because the detector's boxes are not repeatable. It was replaced by
+  a template comparison that searches for the previous sighting inside the new one's
+  surroundings (`vision/appearance.py`, DECISIONS D59).
+
+## 9. Vision detection
+
+| Step | What | Why |
+|------|------|-----|
+| Decode | Reject empty, corrupt, non-image and tiny files; scale down frames wider than 1600 px | Bad uploads must not reach the model |
+| Denoise | Bilateral filter | Short exposures and dust give noise; the filter keeps edges, which is what a crack is |
+| Contrast | CLAHE on the lightness channel | Dark rubber under dust has little contrast and lighting is uneven; contrast is stretched tile by tile |
+| Detect | YOLO11n fine-tuned on CPU, image size 320 | Smallest model of the family; the budget is a laptop CPU |
+| Register | Belt position, class and appearance (section 8) | To report unique damages, not detections |
+
+The model is loaded on the first image, not at start-up. Without a weights file the
+endpoint answers 503 with the commands that create one, and the rest of the backend works.
+
+**The dataset is a stand-in.** No belt-damage dataset could be both verified and
+downloaded without an account (DECISIONS D47). The detector is trained on crack-seg:
+4,029 public photographs of cracks in roads and walls. It is a prototype crack detector,
+not a belt damage detector. Its validation metrics are in
+[vision_training_results.md](vision_training_results.md).
+
+## 10. Architecture
+
+```mermaid
+flowchart LR
+    subgraph Sources
+        SIM[Sensor simulator<br/>faults + messy data]
+        CAM[Camera frames<br/>seed_demo.py replays a loop]
+    end
+    subgraph Backend [FastAPI backend]
+        VAL[validation.py<br/>reject or flag each reading]
+        CRUD[crud.py<br/>de-duplicate, order, store]
+        LIVE[ml/live.py<br/>runs on every ingest]
+        DET[ml/predict.py<br/>forest + limit + drift rules]
+        RISK[ml/risk.py<br/>what, where, when]
+        VIS[vision/detection.py<br/>preprocess + YOLO]
+        REG[vision/belt_registry.py<br/>unique damages on the loop]
+    end
+    DB[(SQLite)]
+    DASH[Streamlit dashboard]
+    SIM -- "POST /api/sensors/readings" --> VAL --> CRUD --> DB
+    CRUD --> LIVE --> DET --> DB
+    LIVE --> RISK --> DB
+    CAM -- "POST /api/vision/detect<br/>image + belt position + lap" --> VIS --> REG --> DB
+    DB -- "GET endpoints" --> DASH
+    SIM -. "CSV with hidden ground truth" .-> EVAL[ml/train.py<br/>ml/evaluation.py]
+```
+
+Sensor data and vision data meet only in the database and the dashboard. They use
+different coordinates on purpose: stations are at kilometres on the structure, damage is
+at metres along the moving belt.

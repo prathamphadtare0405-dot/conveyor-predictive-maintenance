@@ -16,7 +16,9 @@ from fastapi import FastAPI
 
 from backend.config import settings
 from backend.database import init_db
-from backend.routes import anomalies, predictions, sensors, system
+from fastapi.staticfiles import StaticFiles
+
+from backend.routes import anomalies, predictions, sensors, system, vision
 
 logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -36,4 +38,9 @@ app = FastAPI(
 app.include_router(sensors.router)
 app.include_router(anomalies.router)
 app.include_router(predictions.router)
+app.include_router(vision.router)
 app.include_router(system.router)
+
+# Annotated frames, for the dashboard.
+settings.vision_output_dir.mkdir(parents=True, exist_ok=True)
+app.mount(vision.IMAGE_URL_PREFIX, StaticFiles(directory=settings.vision_output_dir), name="vision-images")

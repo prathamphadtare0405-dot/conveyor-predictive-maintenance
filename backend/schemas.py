@@ -139,6 +139,87 @@ class SensorDetail(SensorOut):
     readings_stored: int
 
 
+# --- vision ----------------------------------------------------------------------------
+
+
+class BoxOut(BaseModel):
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+
+
+class FrameDetectionOut(BaseModel):
+    damage_class: str
+    confidence: float
+    box: BoxOut  # pixels in the analysed image
+    area_fraction: float
+    damage_id: int
+    is_new_damage: bool
+
+
+class DetectResponse(BaseModel):
+    frame_id: int
+    captured_at: UtcDatetime
+    belt_position_m: float
+    lap: int
+    position_source: str
+    image_width: int
+    image_height: int
+    detections: list[FrameDetectionOut]
+    annotated_image_url: str | None
+
+
+class DetectionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    frame_id: int
+    damage_id: int
+    captured_at: UtcDatetime
+    belt_position_m: float
+    lap: int
+    damage_class: str
+    confidence: float
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    image_width: int
+    image_height: int
+    area_fraction: float
+    is_new_damage: bool
+
+
+class SizePoint(BaseModel):
+    lap: int
+    area_fraction: float
+    confidence: float
+    seen_at: UtcDatetime
+    detections: int
+
+
+class DamageOut(BaseModel):
+    id: int
+    damage_class: str
+    status: str
+    confirmed: bool
+    belt_position_m: float
+    lateral: float
+    first_seen_at: UtcDatetime
+    last_seen_at: UtcDatetime
+    first_lap: int
+    last_lap: int
+    laps_seen: int
+    sightings: int
+    best_confidence: float
+    last_confidence: float
+    growth_trend: str
+    growth_pct_per_lap: float | None
+    size_history: list[SizePoint]
+    annotated_image_url: str | None
+
+
 # --- system ----------------------------------------------------------------------------
 
 

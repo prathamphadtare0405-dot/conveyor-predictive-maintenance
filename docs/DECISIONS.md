@@ -325,3 +325,122 @@ from the author. The vision view is added with phase 5.
 
 ### D46. `run.py` binds the dashboard to localhost
 - Streamlit listens on all network interfaces by default. A demo does not need that.
+
+---
+
+## Phase 5: vision
+
+### D47. Dataset: crack-seg (cracks in roads and walls), used as a stand-in
+- **Candidates looked at:**
+  - Roboflow Universe projects "conveyor belt tear", "CBDD" and others. Their pages
+    returned HTTP 403 to automated access, so classes, sizes and licences could not be
+    confirmed, and downloading needs an account and API key.
+  - BeltCrack (GitHub UESTC-nnLab/BeltCrack, paper arXiv 2506.17892): real belt images in
+    sequences, 14,087 and 9,645 images. The repository page loads and is Apache-2.0, but
+    the data is on ScienceDB, whose page could not be read automatically; annotation
+    format, size and the dataset's own licence stayed unconfirmed.
+  - Mendeley "In-lab image dataset of foreign objects and anomalies in iron ore conveyor
+    belts" (CC BY 4.0): foreign objects on a lab belt, not belt damage.
+  - Kaggle: no belt-damage dataset found; needs an account and API key anyway.
+  - crack-seg, published by Ultralytics: 4,029 photographs of cracks in roads and walls,
+    one class, segmentation masks, marked Public Domain on its documentation page, direct
+    download with no account.
+- **Author's instruction:** everything must be free; first "no API keys", then "free API
+  keys are fine". The assistant had recommended the Roboflow belt-tear set (needs a key).
+- **Choice:** crack-seg. It is the only candidate whose facts could be verified and which
+  downloads without anyone creating an account. The counts were checked after download
+  (3,717 / 200 / 112 images, one class).
+- **What this costs:** the detector is a crack detector for masonry and asphalt. It is not
+  a belt damage detector and is not presented as one. This is the spec's stated fallback
+  ("a generic surface-defect dataset ... clearly labelled as a prototype").
+- **How to switch:** put a belt dataset in YOLO format under `data/datasets/`, point
+  `vision/dataset.py` at it and retrain. Nothing else depends on the dataset.
+
+### D48. Segmentation polygons are converted to bounding boxes
+- The API has to return boxes, and box detection is cheaper to train on CPU than
+  segmentation. A box around a thin diagonal crack is mostly background; this is stated in
+  the training report.
+
+### D49. Training budget
+- YOLO11n, 800 of 3,717 training images (seeded subset), the whole validation split,
+  image size 320, 12 epochs, CPU. Chosen to finish in roughly ten minutes on the laptop.
+
+### D50. The same preprocessing is applied to training images and at inference
+- Bilateral denoise, then CLAHE on the lightness channel (reasons in
+  `vision/preprocessing.py`). Training on unprocessed images and then feeding processed
+  ones would show the model images unlike its training data.
+
+### D51. Appearance check: difference hash, 256 bits
+- **Options:** perceptual (difference) hash of the crop; ORB keypoint matching.
+- **Choice:** difference hash, match when at least 65 % of bits agree.
+- **Reason:** it is a few lines, has no tunable detector, and tolerates brightness change,
+  blur and small shifts (tested). ORB finds few keypoints on dark, low-texture rubber.
+- **Limit:** it compares coarse structure only. Two similar-looking cracks close together
+  can be merged, and a damage that changes a lot between laps can be split in two.
+
+### D52. One-to-one matching applies within a frame, not within a lap
+- Two boxes in one image are two different things, so an entry takes at most one of them.
+- Two frames of the same pass may show the same damage (overlapping frames), so a second
+  match in the same lap is allowed; it adds a sighting but not a lap.
+- **Changed from the analysis text**, which first said "one to one per lap".
+
+### D53. Position tolerance grows with distance from the reference marker
+- tolerance = 5 m + 0.0005 x metres travelled since the marker (10 m at the far end of the
+  loop). Position error accumulates since the last correction, so a fixed tolerance is
+  either too loose near the marker or too tight far from it.
+
+### D54. "Not re-observed" counts passes, not laps
+- A damage is only counted as missed in the current lap once the camera has gone past its
+  position by more than the tolerance. Otherwise everything ahead of the camera would be
+  marked missing at the start of each lap.
+
+### D55. The client sends the belt position; the backend only falls back to dead reckoning
+- The position tracker belongs with the camera and the speed sensor. The backend accepts
+  `belt_position_m` and `lap` with each frame. Without them it estimates position from the
+  capture time at nominal speed and labels the result `dead_reckoning`.
+
+### D56. Frames without detections are not stored as images
+- Only the frame row is kept (so "passes missed" can be counted). Annotated images are
+  saved only for frames that show damage.
+
+### D57. `POST /api/vision/reset`, `vision/train.py` and `scripts/check_env.py` are additions to the spec
+- Reset empties the damage registry so the demo can be replayed; it would need access
+  control in a real deployment. `vision/train.py` holds the training run and writes
+  `docs/vision_training_results.md`.
+
+### D58. The loop is simulated, with a calibration lap
+- `scripts/seed_demo.py` replays test-split images at fixed belt positions over several
+  laps (details in its docstring). The simulated speed sensor reads 0.4 % high; the first
+  lap sends nothing and only measures that error between two marker events. Without that
+  lap, the first lap's positions would be up to 40 m off and every damage would be
+  registered twice.
+
+### D59. The appearance check was replaced after the first loop replay (supersedes D51)
+- **What happened:** with the difference hash of the box crop, the replay turned 7 placed
+  damages into 19 registry entries. Position tracking was fine (largest error 3.5 m). The
+  cause was the detector: it does not draw the same box around the same crack twice, and a
+  hash of the crop changes when the crop does.
+- **Measured** (40 test images, 5 varied "laps" each, real detector): at its threshold of
+  0.65 the hash accepted 46 % of true repeat sightings. A template comparison (is the stored
+  box content found in the new detection's surroundings, or the reverse; normalised
+  cross-correlation over six scales) accepted 97 % at a threshold of 0.55 and wrongly
+  accepted 0.4 % of pairs of different cracks.
+- **Choice:** template comparison in `vision/appearance.py`, threshold 0.55. The hash stays
+  as the registry's default comparison for unit tests, because it needs no images.
+- **Result of the same replay:** 45 raw detections became 10 registry entries for 7 placed
+  images. In two images the detector found two cracks in the same frame, which the
+  registry correctly keeps apart (9 distinct things). One damage was still registered
+  twice (seen as one entry on laps 1, 2, 6, 7 and as another on laps 3, 4, 5). The repaired
+  damage ended as "not re-observed" and the late one was first registered on lap 3.
+- **The threshold was chosen on the same kind of replayed images it is then demonstrated
+  on.** It is a starting value, not a validated one.
+
+### D60. A damage is "confirmed" after two laps
+- One sighting may be dirt, a shadow or a detector error. The dashboard counts confirmed
+  and unconfirmed damages separately. The cost is one lap (42 minutes) of delay.
+
+### D61. Growth below 5 % per lap is reported as stable
+- In the replay, damages that did not change showed trends of up to about 3 % per lap from
+  box jitter alone. One damage scripted to grow 7 % in scale per lap was reported as
+  growing at +19 % of its first box area per lap; another box on the same image was
+  reported as shrinking. Box area from this detector is a noisy size measure.

@@ -166,8 +166,8 @@ st.caption(
     f"{summary['readings_stored']:,} readings stored · conveyor length {summary['conveyor_length_km']:g} km"
 )
 
-tab_belt, tab_anomalies, tab_predictions, tab_trends, tab_quality = st.tabs(
-    ["Belt status", "Anomalies", "Predictions", "Sensor trends", "Data quality"]
+tab_belt, tab_anomalies, tab_predictions, tab_vision, tab_trends, tab_quality = st.tabs(
+    ["Belt status", "Anomalies", "Predictions", "Vision: belt damage", "Sensor trends", "Data quality"]
 )
 
 # --------------------------------------------------------------------------------------
@@ -335,7 +335,146 @@ with tab_predictions:
     )
 
 # --------------------------------------------------------------------------------------
-# 4. Sensor trends
+# 4. Vision: unique damages on the belt loop
+# --------------------------------------------------------------------------------------
+
+DAMAGE_STYLE = {
+    "active": {"color": "#d03b3b", "symbol": "square", "icon": "■"},
+    "not re-observed": {"color": "#898781", "symbol": "square-open", "icon": "□"},
+}
+
+with tab_vision:
+    st.subheader("Unique damages on the belt")
+    st.caption(
+        "Prototype. The detector was trained on public photographs of cracks in roads and walls, not on belt images, "
+        "and the laps shown here are replayed by `scripts/seed_demo.py`, not filmed. Damage is located by its position "
+        "along the belt loop, which moves past the sensor stations; it is not tied to a station."
+    )
+    vision = summary.get("vision") or {}
+    try:
+        damages = api_get("/api/vision/damages")
+    except BackendDown as exc:
+        damages = None
+        st.error(f"Could not load the damage registry: {exc}")
+
+    if damages is not None:
+        by_status = vision.get("damages_by_status", {})
+        v = st.columns(6)
+        v[0].metric("Confirmed damages", vision.get("confirmed_damages", 0), help="Seen on at least two different laps")
+        v[1].metric("Unconfirmed", vision.get("unconfirmed_damages", 0), help="Seen on one lap only: may be dirt, a shadow or a detector error")
+        v[2].metric("■ Active", by_status.get("active", 0))
+        v[3].metric("□ Not re-observed", by_status.get("not re-observed", 0))
+        v[4].metric("Raw detections", vision.get("raw_detections", 0))
+        v[5].metric("Belt lap", "-" if vision.get("current_lap") is None else vision["current_lap"])
+
+        if summary.get("vision_model", "").startswith("not trained"):
+            st.warning("No trained vision model was found. Run `python scripts/download_dataset.py`, `python -m vision.dataset` and `python -m vision.train`.")
+        if not damages:
+            st.info("No damage has been registered. With the backend running, replay the demo loop:\n\n```\npython scripts/seed_demo.py\n```")
+        else:
+            st.caption(
+                f"{vision.get('raw_detections', 0)} detections were made, but the camera sees the same damage once per lap. "
+                f"Matched by belt position, class and appearance, they are {len(damages)} unique damages "
+                f"(from {vision.get('frames_analysed', 0)} frames analysed)."
+            )
+            loop_m = settings.belt_loop_length_m
+            strip = go.Figure()
+            strip.add_trace(go.Scatter(x=[0, loop_m], y=[0, 0], mode="lines", line=dict(color=AXIS, width=6), hoverinfo="skip", showlegend=False))
+            for status, style in DAMAGE_STYLE.items():
+                group = [d for d in damages if d["status"] == status]
+                strip.add_trace(
+                    go.Scatter(
+                        x=[d["belt_position_m"] for d in group] or [None],
+                        y=[0] * len(group) or [None],
+                        mode="markers+text",
+                        name=f"{status} ({len(group)})",
+                        marker=dict(color=style["color"], symbol=style["symbol"], size=18, line=dict(color=style["color"], width=2)),
+                        text=[f"#{d['id']}" for d in group],
+                        textposition="top center",
+                        textfont=dict(color=INK, size=12),
+                        hovertext=[
+                            f"<b>Damage #{d['id']}</b> ({d['damage_class']}), {status}<br>{d['belt_position_m']:,.1f} m along the belt loop<br>"
+                            f"seen on {d['laps_seen']} laps (laps {d['first_lap']} to {d['last_lap']})<br>size trend: {d['growth_trend']}"
+                            for d in group
+                        ],
+                        hoverinfo="text",
+                    )
+                )
+            strip.update_layout(
+                height=210, margin=dict(l=10, r=10, t=10, b=40), plot_bgcolor="#fcfcfb", paper_bgcolor="#fcfcfb",
+                legend=dict(orientation="h", y=-0.4, x=0, font=dict(color=INK)),
+                xaxis=dict(title="Position along the belt loop (m from the reference marker)", range=[-loop_m * 0.02, loop_m * 1.02], gridcolor=GRID, zeroline=False, color=MUTED),
+                yaxis=dict(visible=False, range=[-1, 1.4]),
+            )
+            st.plotly_chart(strip, width="stretch")
+
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Damage": f"#{d['id']}",
+                            "Class": d["damage_class"],
+                            "Status": f"{DAMAGE_STYLE[d['status']]['icon']} {d['status']}",
+                            "Confirmed": "yes" if d["confirmed"] else "no (one lap)",
+                            "Belt position (m)": d["belt_position_m"],
+                            "Laps seen": d["laps_seen"],
+                            "First to last lap": f"{d['first_lap']} to {d['last_lap']}",
+                            "Detections": d["sightings"],
+                            "Confidence (latest)": d["last_confidence"],
+                            "Confidence (best)": d["best_confidence"],
+                            "Size trend": d["growth_trend"],
+                            "Growth % per lap": d["growth_pct_per_lap"],
+                            "Last seen (UTC)": fmt_time(d["last_seen_at"]),
+                        }
+                        for d in damages
+                    ]
+                ),
+                hide_index=True, width="stretch",
+            )
+
+            labels = {f"#{d['id']}  {d['damage_class']} at {d['belt_position_m']:,.1f} m ({d['status']})": d for d in damages}
+            growing = next((k for k, d in labels.items() if d["growth_trend"] == "growing"), None)
+            choice = st.selectbox("Damage to inspect", list(labels), index=list(labels).index(growing) if growing else 0)
+            d = labels[choice]
+            left, right = st.columns([1, 1])
+            with left:
+                st.markdown(f"**Latest annotated frame of damage #{d['id']}**")
+                if d["annotated_image_url"]:
+                    try:
+                        image = requests.get(f"{API}{d['annotated_image_url']}", timeout=10)
+                        if image.status_code == 200:
+                            st.image(image.content, width="stretch")
+                        else:
+                            st.info("The annotated image is no longer available on the backend.")
+                    except requests.RequestException:
+                        st.info("The annotated image could not be loaded.")
+                else:
+                    st.info("No annotated image was stored for this damage.")
+            with right:
+                st.markdown("**Size per lap** (detection box area as a share of the frame)")
+                points = pd.DataFrame(d["size_history"])
+                size = go.Figure(
+                    go.Scatter(
+                        x=points["lap"], y=points["area_fraction"] * 100.0, mode="lines+markers",
+                        line=dict(color=SERIES, width=2), marker=dict(size=9, color=SERIES),
+                        hovertemplate="lap %{x}<br>%{y:.1f} % of the frame<extra></extra>",
+                    )
+                )
+                size.update_layout(
+                    height=300, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="#fcfcfb", paper_bgcolor="#fcfcfb", showlegend=False,
+                    xaxis=dict(title="Belt lap", dtick=1, gridcolor=GRID, color=MUTED),
+                    yaxis=dict(title="Box area (% of frame)", rangemode="tozero", gridcolor=GRID, color=MUTED),
+                )
+                st.plotly_chart(size, width="stretch")
+                trend = d["growth_trend"]
+                if d["growth_pct_per_lap"] is not None:
+                    st.caption(f"Trend over {len(points)} laps: {trend}, {d['growth_pct_per_lap']:+.1f} % of the first size per lap. "
+                               "Sizes are relative; without camera calibration they cannot be given in millimetres.")
+                else:
+                    st.caption("A trend needs at least three laps.")
+
+# --------------------------------------------------------------------------------------
+# 5. Sensor trends
 # --------------------------------------------------------------------------------------
 
 with tab_trends:
@@ -394,7 +533,7 @@ with tab_trends:
         st.info("No readings for this station in the selected period.")
 
 # --------------------------------------------------------------------------------------
-# 5. Data quality
+# 6. Data quality
 # --------------------------------------------------------------------------------------
 
 with tab_quality:

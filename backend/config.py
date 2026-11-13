@@ -133,6 +133,9 @@ class Settings:
     vision_output_dir: Path = field(default_factory=lambda: _path("VISION_OUTPUT_DIR", "data/vision"))
     registry_position_tolerance_m: float = field(default_factory=lambda: _float("REGISTRY_POSITION_TOLERANCE_M", 5.0))
     registry_missed_laps: int = field(default_factory=lambda: _int("REGISTRY_MISSED_LAPS", 3))
+    registry_drift_per_m: float = field(default_factory=lambda: _float("REGISTRY_DRIFT_PER_M", 0.0005))
+    registry_lateral_tolerance: float = field(default_factory=lambda: _float("REGISTRY_LATERAL_TOLERANCE", 0.2))
+    registry_min_similarity: float = field(default_factory=lambda: _float("REGISTRY_MIN_SIMILARITY", 0.55))
 
     # Dashboard
     dashboard_refresh_s: int = field(default_factory=lambda: _int("DASHBOARD_REFRESH_S", 5))
