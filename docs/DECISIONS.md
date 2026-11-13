@@ -290,3 +290,38 @@ Scope cuts are logged here too, with the reason.
 ### D40. `ml/live.py` is an addition to the spec's file list
 - `ml/predict.py` holds the detector with no database access; `ml/live.py` connects
   detector and predictor to the backend's tables.
+
+---
+
+## Phases 6 and 7 (sensor side): dashboard and integration
+
+Built before the vision phase because the vision dataset needs a decision and credentials
+from the author. The vision view is added with phase 5.
+
+### D41. Status is shown by colour, shape and word together
+- Normal is a green circle, abnormal a yellow diamond, predicted failure a red triangle,
+  offline a grey cross, each with its label. Colour alone fails for colour-blind readers
+  and on a projector.
+
+### D42. Trend charts are one chart per signal
+- **Alternative:** all five signals on one chart with two y-axes. Rejected: the signals have
+  different units and scales, and a second axis invites reading crossings that mean nothing.
+- Warning and failure limits are drawn only when they are near the data, so a limit far
+  away does not flatten the line.
+
+### D43. The date filter is a period ending at the latest reading, not a calendar picker
+- With time acceleration the readings' timestamps run ahead of the wall clock. "Last 3
+  hours" of data is unambiguous; a calendar date is not.
+
+### D44. Auto refresh re-runs the whole page
+- **Alternative:** partial refresh of each panel. Rejected as unnecessary: one full refresh
+  is six API calls.
+
+### D45. Checked without a browser
+- The dashboard was run headlessly with Streamlit's test runner in three states (backend
+  down, no data, live data with two faults) and raised no exceptions; `run.py` was run and
+  all three services answered. It has not been looked at in a browser by the assistant;
+  the author takes the screenshots.
+
+### D46. `run.py` binds the dashboard to localhost
+- Streamlit listens on all network interfaces by default. A demo does not need that.
