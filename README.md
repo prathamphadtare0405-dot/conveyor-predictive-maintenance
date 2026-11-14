@@ -34,6 +34,11 @@ pip install -r requirements.txt
 python scripts/check_env.py
 ```
 
+If PowerShell refuses `.venv\Scripts\activate` with "running scripts is disabled on this
+system", either run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` first
+(it applies to that window only), use Command Prompt instead, or skip activation and
+replace `python` with `.venv\Scripts\python.exe` in every command below.
+
 `check_env.py` exercises every compiled library once. If it reports a failure with
 "An Application Control policy has blocked this file", see the note at the end of this section.
 
